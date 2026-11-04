@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>日本語シャドーイング＆ピッチ解析（音声再生改善版）</title>
+  <style>
+    body { font-family: sans-serif; max-width: 850px; margin: 0 auto; padding: 20px; background: #f8f9fa; color: #333; }
+    .card { background: white; padding: 24px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 20px; }
+    h1 { font-size: 1.5rem; margin-top: 0; color: #1a73e8; }
+    .input-section { background: #e8f0fe; border-left: 4px solid #1a73e8; padding: 16px; border-radius: 0 8px 8px 0; margin-bottom: 20px; }
+    .input-section label { display: block; font-weight: bold; margin-bottom: 8px; color: #1a73e8; }
+    .input-section input[type="text"] { width: 100%; padding: 10px; font-size: 1rem; border: 1px solid #c2e7ff; border-radius: 6px; box-sizing: border-box; }
+    .controls { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+    button { padding: 10px 20px; font-size: 1rem; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; }
+    .btn-record { background: #dc3545; color: white; }
+    .btn-stop { background: #6c757d; color: white; }
+    .btn-play { background: #0d6efd; color: white; }
+    .btn-export { background: #198754; color: white; margin-left: auto; }
+    .btn-clear { background: #ffc107; color: #333; }
+    button:disabled { background: #e0e0e0 !important; cursor: not-allowed; color: #aaa; }
+    canvas { width: 100%; height: 180px; background: #1e1e1e; border-radius: 8px; display: block; }
+    .status { margin-top: 8px; font-size: 0.9rem; color: #666; text-align: right; }
+    .result-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 20px 0; }
+    .metric { background: #f1f3f4; padding: 16px; border-radius: 8px; text-align: center; }
+    .metric-val { font-size: 2rem; font-weight: bold; color: #1a73e8; }
+    .transcript-box { grid-column: span 2; background: #fff; border: 1px solid #dadce0; padding: 12px; border-radius: 8px; }
+    .advice-box { grid-column: span 2; background: #ffeef0; border-left: 4px solid #dc3545; padding: 12px; border-radius: 4px; font-size: 0.95rem; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.85rem; }
+    th, td { border: 1px solid #dee2e6; padding: 8px; text-align: left; }
+    th { background: #f1f3f4; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🎤 日本語シャドーイング＆ピッチ解析</h1>
+    <p>練習したいテキストを入力し、「録音開始」を押して発話してください。</p>
+
+    <div class="input-section">
+      <label for="targetTextInput">📝 練習テキスト（自由に書き換えてください）:</label>
+      <input type="text" id="targetTextInput" value="はじめまして。よろしくおねがいします。">
+    </div>
+
+    <div class="controls">
+      <button id="recordBtn" class="btn-record">🎤 録音開始</button>
+      <button id="stopBtn" class="btn-stop" disabled>⏹️ 停止して解析</button>
+      <button id="playBtn" class="btn-play" disabled>▶️ 自分の発音を聞く</button>
+    </div>
+
+    <div>
+      <canvas id="pitchCanvas"></canvas>
+      <div class="status" id="statusText">待機中...</div>
+    </div>
+
+    <div class="result-panel">
+      <div class="metric">
+        <div>発音一致度（スコア）</div>
+        <div class="metric-val" id="scoreVal">--</div>
+      </div>
+      <div class="metric">
+        <div>推定ピッチ平均 (Hz)</div>
+        <div class="metric-val" id="pitchVal">--</div>
+      </div>
+      <div class="transcript-box">
+        <strong>音声認識（文字起こし結果）:</strong>
+        <p id="transcriptText" style="margin: 8px 0 0 0; color: #555;">（ここに認識されたテキストが表示されます）</p>
+      </div>
+      <div class="advice-box">
+        <strong>💡 イントネーション・発音フィードバック:</strong>
+        <p id="adviceText" style="margin: 8px 0 0 0; color: #333;">（解析後にアドバイスが表示されます）</p>
+      </div>
+    </div>
+
+    <hr style="margin: 30px 0; border: none; border-top: 1px solid #eee;">
+    <div style="display: flex; align-items: center; margin-bottom: 10px;">
+      <h3 style="margin: 0;">📊 実験試行ログ</h3>
+      <button id="exportBtn" class="btn-export">📥 CSVでダウンロード</button>
+      <button id="clearBtn" class="btn-clear" style="margin-left: 8px;">🗑️ ログ消去</button>
+    </div>
+    
+    <table id="logTable">
+      <thead>
+        <tr>
+          <th>日時</th>
+          <th>お手本テキスト</th>
+          <th>認識テキスト</th>
+          <th>スコア</th>
+          <th>ピッチ</th>
+          <th>フィードバック</th>
+        </tr>
+      </thead>
+      <tbody id="logBody"></tbody>
+    </table>
+  </div>
+
+  <script>
+    let audioCtx, analyser, microphone, stream;
+    let workletNode, scriptNode, pcmChunks = [], recordedSampleRate = 44100, audioURL = null;
+    let isRecording = false;
+    let pitchData = [];
+    let animationId, recognition;
+    let logs = JSON.parse(localStorage.getItem('shadowing_logs') || '[]');
+
+    const recordBtn = document.getElementById('recordBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const playBtn = document.getElementById('playBtn');
+    const exportBtn = document.getElementById('exportBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const targetTextInput = document.getElementById('targetTextInput');
+    const canvas = document.getElementById('pitchCanvas');
+    const ctx = canvas.getContext('2d');
+    const statusText = document.getElementById('statusText');
+
+    canvas.width = canvas.offsetWidth || 750;
+    canvas.height = canvas.offsetHeight || 180;
+
+    renderLogs();
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let finalTranscript = '', wantRecognition = false;
+    if (SpeechRecognition) {
+      recognition = new SpeechRecognition();
+      recognition.lang = 'ja-JP';
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.onresult = (event) => {
+        let interim = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const t = event.results[i][0].transcript;
+          if (event.results[i].isFinal) finalTranscript += t; else interim += t;
+        }
+        const transcript = finalTranscript + interim;
+        document.getElementById('transcriptText').innerText = transcript || '（聞き取り中...）';
+        calculateScore(transcript);
+      };
+      recognition.onerror = (e) => {
+        if (e.error === 'no-speech' || e.error === 'aborted') return;
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+          wantRecognition = false;
+          statusText.innerText = "音声認識が許可されていません（録音は続行します）";
+        } else {
+          statusText.innerText = "音声認識エラー: " + e.error;
+        }
+      };
+      // Safariは continuous でも途中で終了することがあるため、録音中は自動で再開する
+      recognition.onend = () => {
+        if (wantRecognition) { try { recognition.start(); } catch (e) {} }
+      };
+    } else {
+      document.getElementById('transcriptText').innerText = "このブラウザは音声認識に対応していません（録音と再生は使えます）";
+    }
+
+    recordBtn.addEventListener('click', startRecording);
+    stopBtn.addEventListener('click', stopRecording);
+    playBtn.addEventListener('click', playRecording);
+    exportBtn.addEventListener('click', exportCSV);
+    clearBtn.addEventListener('click', clearLogs);
+
+    // 生のPCMを自前で録音（MediaRecorderのコーデック差・Safari固有の問題を避ける）
+    async function setupPcmRecorder() {
+      const mute = audioCtx.createGain();
+      mute.gain.value = 0;
+      mute.connect(audioCtx.destination);
+      analyser.connect(mute); // Safari対策: analyserも出力側につなぐ（音は出ない）
+
+      if (audioCtx.audioWorklet) {
+        try {
+          const code = "class Rec extends AudioWorkletProcessor {" +
+            "process(inputs){ const ch = inputs[0][0]; if (ch) this.port.postMessage(ch.slice(0)); return true; } }" +
+            "registerProcessor('pcm-recorder', Rec);";
+          const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+          await audioCtx.audioWorklet.addModule(url);
+          URL.revokeObjectURL(url);
+          workletNode = new AudioWorkletNode(audioCtx, 'pcm-recorder');
+          workletNode.port.onmessage = (e) => { if (isRecording) pcmChunks.push(e.data); };
+          microphone.connect(workletNode);
+          workletNode.connect(mute);
+          return;
+        } catch (e) { console.warn("AudioWorklet失敗、ScriptProcessorに切替:", e); }
+      }
+      scriptNode = audioCtx.createScriptProcessor(4096, 1, 1);
+      scriptNode.onaudioprocess = (e) => {
+        if (isRecording) pcmChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      };
+      microphone.connect(scriptNode);
+      scriptNode.connect(mute);
+    }
+
+    function encodeWav(chunks, sampleRate) {
+      const total = chunks.reduce((a, c) => a + c.length, 0);
+      if (!total) return null;
+      const buf = new ArrayBuffer(44 + total * 2);
+      const v = new DataView(buf);
+      const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+      w(0, 'RIFF'); v.setUint32(4, 36 + total * 2, true); w(8, 'WAVE'); w(12, 'fmt ');
+      v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+      v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * 2, true);
+      v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, total * 2, true);
+      let o = 44;
+      for (const c of chunks) {
+        for (let i = 0; i < c.length; i++) {
+          const s = Math.max(-1, Math.min(1, c[i]));
+          v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+          o += 2;
+        }
+      }
+      return new Blob([buf], { type: 'audio/wav' });
+    }
+
+    async function startRecording() {
+      // Safariはユーザー操作の直後でないと AudioContext が動かないため、await より前に作成する
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      audioCtx.resume();
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+        });
+        await audioCtx.resume();
+        recordedSampleRate = audioCtx.sampleRate;
+
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        microphone = audioCtx.createMediaStreamSource(stream);
+        microphone.connect(analyser);
+
+        pcmChunks = [];
+        isRecording = true;
+        await setupPcmRecorder();
+
+        pitchData = [];
+        finalTranscript = '';
+        recordBtn.disabled = true;
+        stopBtn.disabled = false;
+        playBtn.disabled = true;
+        statusText.innerText = "録音・ピッチ描画中...";
+        document.getElementById('transcriptText').innerText = "（解析中...）";
+        document.getElementById('adviceText').innerText = "（発話データを分析しています...）";
+
+        // 録音が走り出してから音声認識を開始（マイク取得の競合を避ける）
+        if (recognition) {
+          wantRecognition = true;
+          try { recognition.start(); } catch (e) { console.warn(e); }
+        }
+        drawPitch();
+      } catch (err) {
+        isRecording = false;
+        if (audioCtx && audioCtx.state !== 'closed') audioCtx.close();
+        alert("マイクのアクセス許可が必要です: " + err);
+      }
+    }
+
+    function stopRecording() {
+      isRecording = false;
+      wantRecognition = false;
+      if (recognition) { try { recognition.stop(); } catch (e) {} }
+      if (workletNode) { workletNode.port.onmessage = null; workletNode.disconnect(); workletNode = null; }
+      if (scriptNode) { scriptNode.onaudioprocess = null; scriptNode.disconnect(); scriptNode = null; }
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      cancelAnimationFrame(animationId);
+
+      recordBtn.disabled = false;
+      stopBtn.disabled = true;
+      statusText.innerText = "解析完了";
+
+      // 録音データをWAVにして再生可能にする
+      if (audioURL) { URL.revokeObjectURL(audioURL); audioURL = null; }
+      let peak = 0;
+      for (const c of pcmChunks) for (let i = 0; i < c.length; i++) { const a = Math.abs(c[i]); if (a > peak) peak = a; }
+      const wav = encodeWav(pcmChunks, recordedSampleRate);
+      if (wav && peak > 0.001) {
+        audioURL = URL.createObjectURL(wav);
+        playBtn.disabled = false;
+      } else {
+        playBtn.disabled = true;
+        statusText.innerText = "音声が録音できていません（マイクが音声認識と競合した可能性があります）";
+      }
+
+      const validPitches = pitchData.filter(p => p > 0);
+      let avgPitch = 0;
+      if (validPitches.length > 0) {
+        avgPitch = Math.round(validPitches.reduce((a, b) => a + b, 0) / validPitches.length);
+        document.getElementById('pitchVal').innerText = avgPitch + " Hz";
+      }
+
+      const targetText = targetTextInput.value;
+      const advice = generateAdvice(validPitches, targetText);
+      document.getElementById('adviceText').innerText = advice;
+
+      setTimeout(() => {
+        const now = new Date().toLocaleString('ja-JP');
+        const text = document.getElementById('transcriptText').innerText;
+        const score = document.getElementById('scoreVal').innerText;
+        const logItem = { timestamp: now, target: targetText, text: text, score: score, pitch: avgPitch + " Hz", advice: advice };
+        logs.unshift(logItem);
+        localStorage.setItem('shadowing_logs', JSON.stringify(logs));
+        renderLogs();
+      }, 1000);
+
+      if (audioCtx && audioCtx.state !== 'closed') audioCtx.close();
+    }
+
+    function playRecording() {
+      if (!audioURL) {
+        alert("再生できる音声データがありません。");
+        return;
+      }
+      const audio = new Audio(audioURL);
+      audio.play().catch(err => alert("再生できませんでした: " + err));
+    }
+
+    function generateAdvice(pitches, targetStr) {
+      if (pitches.length < 10) return "発話が短すぎるか、音声を正常に検出できませんでした。もう少しはっきり発話してみてください。";
+
+      const start = pitches.slice(0, Math.floor(pitches.length * 0.3));
+      const mid = pitches.slice(Math.floor(pitches.length * 0.3), Math.floor(pitches.length * 0.7));
+      const end = pitches.slice(Math.floor(pitches.length * 0.7));
+
+      const avgStart = start.reduce((a, b) => a + b, 0) / (start.length || 1);
+      const avgMid = mid.reduce((a, b) => a + b, 0) / (mid.length || 1);
+      const avgEnd = end.reduce((a, b) => a + b, 0) / (end.length || 1);
+      
+      const maxPitch = Math.max(...pitches);
+      const minPitch = Math.min(...pitches);
+      const range = maxPitch - minPitch;
+
+      let feedback = [];
+
+      if (range < 30) {
+        feedback.push("全体的に抑揚が少なく平坦な発話になっています。文頭を少し意識して高めに入ると自然になります。");
+      }
+
+      const isQuestion = /[？\?か]$/.test(targetStr.trim());
+
+      if (isQuestion) {
+        if (avgEnd < avgMid) {
+          feedback.push("疑問文ですが、語尾のピッチが下がっています。最後の音を少し持ち上げる意識で発話しましょう。");
+        } else {
+          feedback.push("疑問文に合わせた自然な語尾の立ち上がりができています。");
+        }
+      } else {
+        if (avgEnd > avgStart * 1.15) {
+          feedback.push("平叙文ですが語尾のピッチが上がっています（疑問文のように聞こえる可能性があります）。文末は静かに下げて終えましょう。");
+        } else if (avgStart > avgEnd * 1.1) {
+          feedback.push("文頭から文末にかけて自然なピッチの下降（ダウンステップ）ができています。");
+        } else {
+          feedback.push("安定したピッチで発話できています。言葉の区切り（文節）での抑揚をさらに意識するとより自然になります。");
+        }
+      }
+
+      return feedback.join(" ");
+    }
+
+    function autoCorrelate(buf, sampleRate) {
+      let SIZE = buf.length;
+      let rms = 0;
+      for (let i = 0; i < SIZE; i++) rms += buf[i] * buf[i];
+      rms = Math.sqrt(rms / SIZE);
+      if (rms < 0.004) return -1;
+
+      let r1 = 0, r2 = SIZE - 1, thres = 0.2;
+      for (let i = 0; i < SIZE / 2; i++) { if (Math.abs(buf[i]) < thres) { r1 = i; break; } }
+      for (let i = 1; i < SIZE / 2; i++) { if (Math.abs(buf[SIZE - i]) < thres) { r2 = SIZE - i; break; } }
+
+      buf = buf.slice(r1, r2);
+      SIZE = buf.length;
+
+      let c = new Array(SIZE).fill(0);
+      for (let i = 0; i < SIZE; i++) {
+        for (let j = 0; j < SIZE - i; j++) { c[i] = c[i] + buf[j] * buf[j + i]; }
+      }
+
+      let d = 0;
+      while (c[d] > c[d + 1]) d++;
+      let maxval = -1, maxpos = -1;
+      for (let i = d; i < SIZE; i++) {
+        if (c[i] > maxval) { maxval = c[i]; maxpos = i; }
+      }
+      return sampleRate / maxpos;
+    }
+
+    function drawPitch() {
+      if (!isRecording) return;
+
+      const buffer = new Float32Array(analyser.fftSize);
+      analyser.getFloatTimeDomainData(buffer);
+
+      let sum = 0;
+      for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
+      const level = Math.sqrt(sum / buffer.length);
+      statusText.innerText = "録音・ピッチ描画中... 入力レベル: " + (level * 100).toFixed(1);
+
+      const pitch = autoCorrelate(buffer, audioCtx.sampleRate);
+
+      if (pitch > 50 && pitch < 400) { pitchData.push(pitch); } else { pitchData.push(0); }
+
+      ctx.fillStyle = '#1e1e1e';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.beginPath();
+      ctx.strokeStyle = '#00ffcc';
+      ctx.lineWidth = 3;
+
+      const sliceWidth = canvas.width / 200;
+      const recentPitches = pitchData.slice(-200);
+
+      for (let i = 0; i < recentPitches.length; i++) {
+        const p = recentPitches[i];
+        const x = i * sliceWidth;
+        const y = p === 0 ? canvas.height : canvas.height - ((p - 50) / 350) * canvas.height;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      animationId = requestAnimationFrame(drawPitch);
+    }
+
+    function calculateScore(recognizedText) {
+      const targetText = targetTextInput.value;
+      const cleanTarget = targetText.replace(/[、。！？\?\s]/g, '');
+      const cleanRecognized = recognizedText.replace(/[、。！？\?\s]/g, '');
+      if (!cleanTarget.length) return;
+      
+      let matches = 0;
+      for (let char of cleanRecognized) { if (cleanTarget.includes(char)) matches++; }
+      const score = Math.min(100, Math.round((matches / cleanTarget.length) * 100));
+      document.getElementById('scoreVal').innerText = score + "点";
+    }
+
+    function renderLogs() {
+      const tbody = document.getElementById('logBody');
+      tbody.innerHTML = '';
+      logs.forEach(log => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${log.timestamp}</td><td>${log.target || '--'}</td><td>${log.text}</td><td>${log.score}</td><td>${log.pitch}</td><td>${log.advice || '--'}</td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function exportCSV() {
+      if (logs.length === 0) { alert("出力するログがありません。"); return; }
+      let csvContent = "\uFEFF日時,お手本テキスト,認識テキスト,一致度スコア,平均ピッチ,アドバイス\n";
+      logs.forEach(l => {
+        csvContent += `"${l.timestamp}","${(l.target || '').replace(/"/g, '""')}","${l.text.replace(/"/g, '""')}","${l.score}","${l.pitch}","${(l.advice || '').replace(/"/g, '""')}"\n`;
+      });
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = 'shadowing_log.csv';
+      link.click();
+    }
+
+    function clearLogs() {
+      if (confirm("すべてのログを削除しますか？")) {
+        logs = [];
+        localStorage.removeItem('shadowing_logs');
+        renderLogs();
+      }
+    }
+  </script>
+</body>
+</html>
